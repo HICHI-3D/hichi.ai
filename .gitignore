@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# uv / venv
+.venv/
+venv/
+env/
+
+# 환경변수
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# 테스트/캐시
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── 모델/데이터 (용량 큰 파일은 git에 안 올린다) ───
+# 모델 가중치
+models/weights/
+models/checkpoints/
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# 데이터셋
+data/raw/
+data/processed/
+data/cubicasa5k/
+data/floor_plans/
+data/furniture/
+
+# 학습 로그
+runs/
+logs/
+wandb/
+mlruns/
+
+# 3D 재구성 산출물
+outputs/
+*.ply
+*.obj
+*.glb
+
+# 업로드/임시
+uploads/
+temp/
+tmp/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+# .idea/
+.vscode/
+*.swp

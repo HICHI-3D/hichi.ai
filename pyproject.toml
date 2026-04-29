@@ -1,0 +1,69 @@
+[project]
+name = "hichi-ai"
+version = "0.1.0"
+description = "하이치 - AI 추론 서버 및 모델 학습 워크스페이스"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [
+    { name = "박소은", email = "24.024@bssm.hs.kr" }
+]
+dependencies = [
+    # ─── 핵심 ML/CV ────────────────────────────────────────────
+    "torch>=2.5.0",                # macOS는 MPS, CUDA는 별도 인덱스 필요 (README 참고)
+    "torchvision>=0.20.0",
+    "ultralytics>=8.3.0",          # YOLO v8/v11
+    "segment-anything>=1.0",       # Meta SAM
+    "opencv-python>=4.10.0",
+    "numpy>=1.26.0,<2.2.0",        # ultralytics와 호환되는 버전대
+    "pillow>=11.0.0",
+    "scikit-image>=0.24.0",
+    "scipy>=1.14.0",
+
+    # ─── 추론 서버 (FastAPI) ──────────────────────────────────
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.1",
+    "loguru>=0.7.2",
+
+    # ─── 학습/실험 유틸 ───────────────────────────────────────
+    "tqdm>=4.66.0",
+    "matplotlib>=3.9.0",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.0",
+
+    # ─── 3D 재구성 후처리 (COLMAP 결과를 메쉬/glTF로) ─────────
+    "trimesh>=4.5.0",
+    "open3d>=0.18.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.0",
+    "ipykernel>=6.29.0",
+    "ruff>=0.7.0",
+    "pytest>=8.3.0",
+]
+# 도면 처리 / Floor plan 인식 (선택 설치)
+floorplan = [
+    "shapely>=2.0.0",          # 다각형/선분 연산
+    "svgwrite>=1.4.0",         # SVG 출력 (CubiCasa5K 호환)
+    "lxml>=5.0.0",             # SVG 파싱
+]
+# 3D 재구성 시각화 (선택 설치, 노트북에서 메쉬 미리보기 등)
+reconstruction-viz = [
+    "pyglet<2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
