@@ -203,13 +203,16 @@ class FurnitureReconstructionPipeline:
             shutil.copy(src, dst)
 
         # ─── 1) feature_extractor ────────────────────────────────
+        # NOTE: --SiftExtraction.use_gpu / --SiftMatching.use_gpu 는 macOS brew 빌드
+        # (CUDA 없이 컴파일된 COLMAP) 에서 옵션 자체가 존재하지 않아 파싱 에러를 낸다.
+        # 해당 빌드는 어차피 CPU 만 쓰므로 플래그를 생략하고 COLMAP 기본 동작에 맡긴다.
+        # CUDA 빌드를 쓰면서 GPU 사용을 강제로 막아야 하는 환경이 생기면 그때 다시 추가.
         progress(0.10, "feature_extraction")
         await _run([
             self.colmap_bin, "feature_extractor",
             "--database_path", str(db_path),
             "--image_path", str(images_dir),
             "--ImageReader.single_camera", "1",
-            "--SiftExtraction.use_gpu", "0",
         ])
 
         # ─── 2) exhaustive_matcher ───────────────────────────────
@@ -217,7 +220,6 @@ class FurnitureReconstructionPipeline:
         await _run([
             self.colmap_bin, "exhaustive_matcher",
             "--database_path", str(db_path),
-            "--SiftMatching.use_gpu", "0",
         ])
 
         # ─── 3) mapper (SfM) ─────────────────────────────────────
