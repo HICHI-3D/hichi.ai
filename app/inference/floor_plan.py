@@ -129,16 +129,19 @@ def _binarize(gray: np.ndarray, dark_threshold: int = 70) -> np.ndarray:
 
 
 def _morphology_clean(binary: np.ndarray) -> np.ndarray:
-    """Opening 7×7 + Closing 7×7 으로 노이즈 제거 및 벽 연결."""
-    # Opening: 텍스트 획, 단일 픽셀 선, 바닥 텍스처 제거 (7×7 으로 두꺼운 마루 줄무늬도 제거)
-    kernel_7_open = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_7_open)
-    white_after_open = int(np.count_nonzero(opened))
-    logger.info(f"  Opening 7×7 후 흰 픽셀: {white_after_open}")
+    """Opening 5×5 + Closing 7×7.
 
-    # Closing: 문 개구부 등으로 끊긴 벽 잇기
-    kernel_7 = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_7)
+    5×5 opening: 텍스트 획·바닥 텍스처는 제거하면서 얇은 벽은 살림
+        (7×7 은 너무 공격적이라 옅은 회색 벽이 끊김).
+    7×7 closing: 문 개구부 등으로 끊긴 벽 잇기.
+    """
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+    white_after_open = int(np.count_nonzero(opened))
+    logger.info(f"  Opening 5×5 후 흰 픽셀: {white_after_open}")
+
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close)
     white_after_close = int(np.count_nonzero(closed))
     logger.info(f"  Closing 7×7 후 흰 픽셀: {white_after_close}")
 
@@ -175,24 +178,35 @@ def _filter_components(binary: np.ndarray, min_area_ratio: float = 0.0008) -> np
         f"전경 면적 합={total_fg}px² | 상위 3: {top3_info}"
     )
 
-    # 유지할 컴포넌트 결정: 기본 상위 1개
+    # 유지할 컴포넌트 결정
     keep_ids: list[int] = []
     if label_areas:
         top1_id, top1_area = label_areas[0]
         keep_ids.append(top1_id)
 
-        # 발코니/서비스 영역 등 분리된 구조체가 있으면 상위 2개 유지
-        if len(label_areas) >= 2:
+        image_area_fraction = top1_area / max(h * w, 1)
+
+        # 상위 1위가 이미지의 5% 미만이면 벽 네트워크가 분산돼 있을 가능성
+        # → 상위 5개까지 유지해서 누락 방지
+        if image_area_fraction < 0.05:
+            for lid, _ in label_areas[1:5]:
+                keep_ids.append(lid)
+            logger.info(
+                f"  → 1위 컴포넌트가 이미지의 {image_area_fraction*100:.2f}% 만 차지 "
+                f"→ 분산된 벽 네트워크로 판단, 상위 5개 유지"
+            )
+        elif len(label_areas) >= 2:
+            # 발코니/서비스 영역 등 분리된 구조체가 있으면 상위 2개 유지
             top2_id, top2_area = label_areas[1]
             add_second = (
-                top1_area / max(total_fg, 1) < 0.25  # 1위도 전체의 25% 미만이면 분산됨
-                or top2_area / max(top1_area, 1) > 0.4  # 2위가 1위의 40% 이상이면 독립 구조
+                top1_area / max(total_fg, 1) < 0.25
+                or top2_area / max(top1_area, 1) > 0.4
             )
             if add_second:
                 keep_ids.append(top2_id)
 
-    # 벨트+멜빵: 절대 면적이 너무 작은 건 제거
-    abs_min_area = max(0.01 * total_fg, min_area_ratio * h * w)
+    # 벨트+멜빵: 절대 면적이 너무 작은 건 제거 (다만 너무 빡빡하지 않게)
+    abs_min_area = max(0.005 * total_fg, min_area_ratio * h * w)
     keep_ids = [lid for lid in keep_ids if dict(label_areas)[lid] >= abs_min_area]
 
     logger.info(
@@ -234,73 +248,98 @@ def _detect_walls_via_contours(
     max_contours: int = 8,
     epsilon_ratio: float = 0.003,
 ) -> list[WallSegment]:
-    """벽 네트워크의 외곽선을 따서 다각형으로 단순화한 뒤, 각 변을 벽으로 변환.
+    """벽 네트워크의 외곽선을 다각형으로 단순화 → 각 변을 벽 세그먼트로.
 
     아이디어 (사용자 통찰):
-        진짜 벽들은 하나의 연결된 검은 네트워크를 이룬다 (문이 있어도 형태적으로
-        morphology close 로 메워짐). 그 네트워크의 외곽선이 곧 건물 윤곽선이며,
-        내부 contour 들은 방 경계가 된다.
-        → 외곽선 + 내부 contour 들을 cv2.approxPolyDP 로 단순화하고, 각 변을 벽 세그먼트로.
+        벽들은 하나의 연결된 검은 네트워크를 이룬다. 그 네트워크의 외곽선이
+        곧 건물 윤곽선이며 자동으로 폐곡선이라 누락이 없음.
+
+    빈 결과가 나오면 자동으로 더 관대한 파라미터로 재시도 (3단계 fallback).
 
     Args:
         binary: 이미 morphology + 컴포넌트 필터를 거친 0/255 마스크.
         min_contour_area_ratio: 이미지 면적 대비 이 비율보다 작은 contour 무시.
-        max_contours: 면적 내림차순 정렬 후 상위 N개만 유지.
-        epsilon_ratio: approxPolyDP 의 epsilon = 둘레 * 이 값. 클수록 거칠게.
+        max_contours: 정렬 후 상위 N개만 유지.
+        epsilon_ratio: approxPolyDP 의 epsilon = 둘레 * 이 값.
     """
     h, w = binary.shape[:2]
     image_area = float(h * w)
 
-    contours, hierarchy = cv2.findContours(
+    contours, _hierarchy = cv2.findContours(
         binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
     )
 
     if not contours:
-        logger.info("  findContours: contour 없음")
+        logger.info("  findContours: contour 없음 (binary 가 비어있음)")
         return []
 
-    # 면적과 함께 보관, 면적 내림차순
-    scored: list[tuple[float, np.ndarray]] = []
-    for c in contours:
-        area = float(cv2.contourArea(c))
-        if area < min_contour_area_ratio * image_area:
+    logger.info(f"  findContours: 총 {len(contours)}개 검출")
+
+    # 3단계 cascade: 빡빡 → 보통 → 매우 관대
+    tiers = [
+        ("strict", min_contour_area_ratio, max_contours, epsilon_ratio),
+        ("relaxed", 0.001, 20, 0.003),
+        ("extreme", 0.0001, 40, 0.005),
+    ]
+
+    for tier_name, area_ratio, n_keep, eps_ratio in tiers:
+        # area 또는 perimeter*10 중 큰 값을 점수로 (얇고 긴 contour 도 살리기)
+        scored: list[tuple[float, np.ndarray]] = []
+        for c in contours:
+            if len(c) < 3:
+                continue
+            area = float(cv2.contourArea(c))
+            perimeter = float(cv2.arcLength(c, closed=True))
+            score = max(area, perimeter * 10.0)
+            # 면적 필터는 최소한만 적용
+            if area < area_ratio * image_area and perimeter < 50:
+                continue
+            scored.append((score, c))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        kept = scored[:n_keep]
+
+        if not kept:
+            logger.info(
+                f"  [{tier_name}] area_ratio={area_ratio}: 0개 → 다음 tier 시도"
+            )
             continue
-        if len(c) < 3:
-            continue
-        scored.append((area, c))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    kept = scored[:max_contours]
 
-    logger.info(
-        f"  findContours: 총 {len(contours)}개 → 면적/길이 필터 후 {len(scored)}개 → "
-        f"상위 {len(kept)}개 유지"
-    )
+        walls: list[WallSegment] = []
+        for idx, (_score, c) in enumerate(kept):
+            area = float(cv2.contourArea(c))
+            perimeter = float(cv2.arcLength(c, closed=True))
+            epsilon = max(2.0, eps_ratio * perimeter)
+            approx = cv2.approxPolyDP(c, epsilon, closed=True)
 
-    walls: list[WallSegment] = []
-    for idx, (area, c) in enumerate(kept):
-        perimeter = float(cv2.arcLength(c, closed=True))
-        epsilon = max(2.0, epsilon_ratio * perimeter)
-        approx = cv2.approxPolyDP(c, epsilon, closed=True)
+            n = len(approx)
+            if n < 3:
+                continue
 
-        n = len(approx)
-        if n < 3:
-            continue
+            pts = approx.reshape(-1, 2)
+            for i in range(n):
+                x1, y1 = pts[i]
+                x2, y2 = pts[(i + 1) % n]
+                walls.append(
+                    WallSegment(float(x1), float(y1), float(x2), float(y2))
+                )
 
-        pts = approx.reshape(-1, 2)  # shape (n, 2)
-        for i in range(n):
-            x1, y1 = pts[i]
-            x2, y2 = pts[(i + 1) % n]
-            walls.append(
-                WallSegment(float(x1), float(y1), float(x2), float(y2))
+            logger.info(
+                f"    contour #{idx}: area={area:.0f}px², perimeter={perimeter:.0f}px "
+                f"→ {n}개 꼭지점 → {n}개 벽"
             )
 
-        logger.info(
-            f"    contour #{idx}: area={area:.0f}px², perimeter={perimeter:.0f}px, "
-            f"→ {n}개 꼭지점 → {n}개 벽"
-        )
+        if walls:
+            logger.info(
+                f"  [{tier_name}] tier 채택: 총 {len(walls)}개 벽 "
+                f"(kept contours={len(kept)})"
+            )
+            return walls
 
-    logger.info(f"  Contour 기반 벽 추출 총: {len(walls)}개")
-    return walls
+        logger.info(f"  [{tier_name}] kept 있었지만 모든 contour 가 다각형으로 변환 실패")
+
+    logger.warning("  ⚠️  모든 tier 에서 0개 — binary 가 정말 비어있음")
+    return []
 
 
 def _orientation_filter(
@@ -466,14 +505,23 @@ class FloorPlanParser:
             f"assume_orthogonal={self.assume_orthogonal}"
         )
 
-        # Step 1: 이진화 (엄격한 dark threshold + Otsu fallback)
+        # Step 1: 이진화 (adaptive → 고정 → Otsu fallback)
         binary = _binarize(gray, dark_threshold=self.dark_threshold)
+        logger.info(f"  [Step1 후] 흰 픽셀: {int(np.count_nonzero(binary))}")
 
-        # Step 2 & 3: Opening 7×7 → Closing 7×7
+        # Step 2 & 3: Opening 5×5 → Closing 7×7
         binary = _morphology_clean(binary)
+        logger.info(f"  [Step2-3 후] 흰 픽셀: {int(np.count_nonzero(binary))}")
 
         # Step 4: Connected-component 필터
         binary = _filter_components(binary, min_area_ratio=0.0008)
+        logger.info(f"  [Step4 후] 흰 픽셀: {int(np.count_nonzero(binary))}")
+        if int(np.count_nonzero(binary)) == 0:
+            logger.warning(
+                "컴포넌트 필터 후 흰 픽셀이 0 — 벽 검출 불가."
+                "원본 이미지의 벽이 너무 옅거나 morphology 가 과했을 가능성."
+            )
+            return ParseResult(walls=[], image_size=(w, h), pixels_per_mm=self.pixels_per_mm)
 
         # Step 5: Contour 기반 벽 추출 (NEW)
         # — 외곽선을 따서 다각형으로 단순화한 뒤, 각 변을 벽으로 변환
