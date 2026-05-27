@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from loguru import logger
 
 from app.core.config import settings
+from app.inference.furniture import classify_category
 from app.jobs import JobNotFoundError, job_queue
 from app.jobs.reconstruction import pipeline
 
@@ -56,13 +57,33 @@ async def create_job(files: list[UploadFile] = File(...)):
     if len(image_paths) < 5:
         raise HTTPException(status_code=400, detail="유효한 이미지가 부족합니다")
 
-    state = job_queue.create(metadata={"image_count": len(image_paths)})
+    # 첫 사진으로 가구 카테고리 자동 인식 (YOLO COCO 사전학습 가중치).
+    # 실패 시 '기타' 가 떨어지므로 잡 진행은 막지 않는다.
+    try:
+        detected_category = classify_category(image_paths[0])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"카테고리 자동 인식 중 예외, '기타' 로 대체: {e}")
+        detected_category = "기타"
+
+    state = job_queue.create(
+        metadata={
+            "image_count": len(image_paths),
+            "detected_category": detected_category,
+        }
+    )
+    # 응답 최상위에서도 detected_category 를 바로 노출하기 위해 result 에 미리 채워둔다.
+    # 파이프라인 완료 시 result 가 덮어 쓰여도 거기서 다시 포함하므로 영구 보존됨.
+    state.result["detected_category"] = detected_category
 
     async def runner(s, prog):
-        return await pipeline.run(s, prog, image_paths=image_paths)
+        out = await pipeline.run(s, prog, image_paths=image_paths)
+        out["detected_category"] = detected_category
+        return out
 
     job_queue.schedule(state.id, runner)
-    logger.info(f"재구성 잡 생성: {state.id} ({len(image_paths)}장)")
+    logger.info(
+        f"재구성 잡 생성: {state.id} ({len(image_paths)}장, category={detected_category})"
+    )
     return state.to_dict()
 
 
